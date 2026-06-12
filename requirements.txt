@@ -1,0 +1,1 @@
+pure-python-adb>=1.0.0

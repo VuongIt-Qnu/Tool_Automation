@@ -13,6 +13,14 @@ from typing import Any
 
 from config import Config
 from human_behavior import HumanBehavior, RiskMonitor
+from telegram_formatter import (
+    format_error,
+    format_finish,
+    format_progress,
+    format_start,
+    format_throttle,
+)
+from telegram_logger import send_telegram
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +44,10 @@ class HumanLikeBot:
         self.risk = RiskMonitor(self.cfg.ERROR_THRESHOLD)
         self.daily_limit = self.cfg.daily_limit(week)
         self.action_count = 0
+        self.like_ok = 0
+        self.comment_ok = 0
+        self.error_count = 0
+        self.last_throttle = 1.0
         # Randomise first long-break checkpoint to prevent all devices
         # pausing at the same cycle count when run in parallel.
         self._next_break_at = random.randint(
@@ -47,18 +59,44 @@ class HumanLikeBot:
     # App lifecycle
     # ------------------------------------------------------------------
 
-    def _open_app(self) -> None:
-        try:
-            self.device.app_start(self.cfg.APP_PACKAGE)
-        except Exception:
+    def _open_app(self) -> bool:
+        for attempt in range(1, 4):
             try:
-                self.device.shell(
-                    f"monkey -p {self.cfg.APP_PACKAGE}"
-                    " -c android.intent.category.LAUNCHER 1"
+                self.device.app_start(self.cfg.APP_PACKAGE)
+                self.behavior.random_delay(1, 2)
+                return True
+            except Exception as exc:
+                logger.warning(
+                    "[%s] App start attempt %d failed: %s",
+                    self.serial,
+                    attempt,
+                    exc,
                 )
-            except Exception:
-                logger.error("[%s] Could not open app %s", self.serial, self.cfg.APP_PACKAGE)
-        self.behavior.random_delay(3, 6)
+                try:
+                    self.device.shell(
+                        f"monkey -p {self.cfg.APP_PACKAGE}"
+                        " -c android.intent.category.LAUNCHER 1"
+                    )
+                    self.behavior.random_delay(1, 2)
+                    return True
+                except Exception as exc2:
+                    logger.warning(
+                        "[%s] Monkey launch attempt %d failed: %s",
+                        self.serial,
+                        attempt,
+                        exc2,
+                    )
+                    self.behavior.random_delay(2, 4)
+
+        err_msg = format_error(
+            device_name=self.serial,
+            action=f"MỞ APP {self.cfg.APP_PACKAGE}",
+            detail="Thử lại 3 lần đều thất bại",
+            decision="DỪNG BOT CHO MÁY NÀY",
+        )
+        send_telegram(err_msg)
+        logger.error("[%s] Could not open app %s after 3 attempts", self.serial, self.cfg.APP_PACKAGE)
+        return False
 
     # ------------------------------------------------------------------
     # Individual actions
@@ -101,15 +139,32 @@ class HumanLikeBot:
             try:
                 if act == "like":
                     self._like_video()
+                    self.like_ok += 1
                 elif act == "comment":
                     self._comment_video()
+                    self.comment_ok += 1
                 # "none" → passive watch, intentionally no click
             except Exception as exc:
                 logger.warning("[%s] Action '%s' failed: %s", self.serial, act, exc)
+                self.error_count += 1
+                error_msg = format_error(
+                    device_name=self.serial,
+                    action=f"CLICK_{act.upper()}",
+                    detail=str(exc),
+                )
+                send_telegram(error_msg)
                 success = False
 
-            # Risk-adjusted delay: doubles when error rate exceeds threshold
             throttle = self.risk.record(success)
+            if throttle > 1.0 and self.last_throttle == 1.0:
+                throttle_msg = format_throttle(
+                    device_name=self.serial,
+                    error_rate=self.risk.error_rate * 100,
+                    threshold=self.cfg.ERROR_THRESHOLD * 100,
+                    factor=throttle,
+                )
+                send_telegram(throttle_msg)
+            self.last_throttle = throttle
             self.behavior.random_delay(
                 self.cfg.DELAY_MIN * throttle,
                 self.cfg.DELAY_MAX * throttle,
@@ -132,17 +187,49 @@ class HumanLikeBot:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
+        start_msg = format_start(
+            device_name=self.serial,
+            week=self.week,
+            daily_target=self.daily_limit,
+        )
+        send_telegram(start_msg)
+
         logger.info(
             "[%s] Start – week %d, daily limit %d",
-            self.serial, self.week, self.daily_limit,
+            self.serial,
+            self.week,
+            self.daily_limit,
         )
-        self._open_app()
+
+        if not self._open_app():
+            return
 
         while (
             self.action_count < self.daily_limit
             and self.behavior.is_natural_activity_time()
         ):
             self._run_one_cycle()
+
+            if self.action_count % 10 == 0:
+                progress_msg = format_progress(
+                    device_name=self.serial,
+                    done_jobs=self.action_count,
+                    total_jobs=self.daily_limit,
+                    like_ok=self.like_ok,
+                    comment_ok=self.comment_ok,
+                    error_count=self.error_count,
+                )
+                send_telegram(progress_msg)
+
+        finish_msg = format_finish(
+            device_name=self.serial,
+            week=self.week,
+            target=self.daily_limit,
+            like_ok=self.like_ok,
+            comment_ok=self.comment_ok,
+            error_count=self.error_count,
+        )
+        send_telegram(finish_msg)
 
         logger.info(
             "[%s] Done – %d/%d cycles, error rate %.0f%%",
