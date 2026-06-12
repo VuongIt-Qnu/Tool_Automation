@@ -1,0 +1,18 @@
+{
+  "default": {
+    "like_button_center": [400, 800],
+    "like_button_size": [100, 50],
+    "comment_button_center": [400, 900],
+    "comment_button_size": [80, 40],
+    "next_video_swipe_from": [500, 1000],
+    "next_video_swipe_to": [500, 500]
+  },
+  "_example_emulator-5554": {
+    "like_button_center": [380, 790],
+    "like_button_size": [100, 50],
+    "comment_button_center": [380, 890],
+    "comment_button_size": [80, 40],
+    "next_video_swipe_from": [490, 1000],
+    "next_video_swipe_to": [490, 500]
+  }
+}
